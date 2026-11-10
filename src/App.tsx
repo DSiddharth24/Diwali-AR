@@ -81,6 +81,17 @@ export default function App() {
     }
   }, [handleIgniteCracker, autoIgniteEnabled]);
 
+  // Handle cracker repositioning on the ground
+  const handleCrackerMoved = useCallback((instanceId: string, newPosition: [number, number, number]) => {
+    setPlacedCrackers((prev) =>
+      prev.map((c) =>
+        c.instanceId === instanceId
+          ? { ...c, position: newPosition }
+          : c
+      )
+    );
+  }, []);
+
   // Drag and drop handlers from the bottom dock
   const handleDragStartCracker = useCallback((cracker: CrackerDefinition, x: number, y: number) => {
     setDraggedCracker(cracker);
@@ -249,6 +260,7 @@ export default function App() {
           placedCrackers={placedCrackers}
           onCrackerPlaced={handleCrackerPlaced}
           onIgniteCracker={handleIgniteCracker}
+          onCrackerMoved={handleCrackerMoved}
           particleEngineRef={particleEngineRef}
           draggedCracker={draggedCracker}
           dragPointer={dragPointer}

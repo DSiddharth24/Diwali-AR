@@ -56,6 +56,12 @@ export interface CrackerSim {
     isWillow: boolean;
   }[];
   nextGarlandIndex?: number;
+  chakkarPhysics?: {
+    wanderAngle: number;
+    wanderSpeed: number;
+    origX: number;
+    origZ: number;
+  };
 }
 
 export class ParticleEngine {
@@ -212,8 +218,8 @@ export class ParticleEngine {
         fireworkAudio.playRocket(sim.def.durationSeconds * 0.4);
         const projectile = sim.rootMesh.getObjectByName('rocketProjectile');
         if (projectile) {
-          // Elevated high-altitude rocket apex (6.2m to 7.8m)
-          const targetApex = 6.2 + Math.random() * 1.6;
+          // Calibrated rocket apex (3.6m to 4.2m) perfectly framed in upper screen viewport
+          const targetApex = 3.6 + Math.random() * 0.6;
           sim.aerialRockets = [{
             mesh: projectile,
             initialPos: projectile.position.clone(),
@@ -221,7 +227,7 @@ export class ParticleEngine {
             targetApex,
             burstDone: false,
             targetY: targetApex,
-            angleZ: (Math.random() - 0.5) * 0.12,
+            angleZ: (Math.random() - 0.5) * 0.08,
           }];
         }
         break;
@@ -268,16 +274,14 @@ export class ParticleEngine {
 
         for (let i = 0; i < count; i++) {
           const launchT = i * interval;
-          // Wide majestic fanned spread angle
+          // Measured fan angle so bursts stay within the screen frame
           const fanIdx = (i % 5) - 2; // -2, -1, 0, 1, 2
-          const fanAngle = fanIdx * 0.18;
-          // High-altitude tiered apex heights (5.8m to 8.5m) for majestic towering sky barrages
+          const fanAngle = fanIdx * 0.12;
+          // Calibrated tiered apex heights (3.3m to 4.3m) framed beautifully without clipping off-screen
           const tier = isGrand ? Math.floor(i / 6) : (i % 3);
-          const apexY = isGrand
-            ? (5.6 + tier * 0.95 + (Math.random() - 0.5) * 0.4)
-            : (5.8 + tier * 0.8 + (Math.random() - 0.5) * 0.35);
-          const apexX = sim.placed.position[0] + Math.sin(fanAngle) * 3.6 + (Math.random() - 0.5) * 0.4;
-          const apexZ = sim.placed.position[2] - 1.2 + (Math.random() - 0.5) * 0.6;
+          const apexY = 3.3 + tier * 0.35 + (Math.random() - 0.5) * 0.2;
+          const apexX = sim.placed.position[0] + Math.sin(fanAngle) * 1.5 + (Math.random() - 0.5) * 0.25;
+          const apexZ = sim.placed.position[2] - 0.8 + (Math.random() - 0.5) * 0.35;
 
           const preset = SHELL_PRESETS[i % SHELL_PRESETS.length];
 
@@ -534,6 +538,25 @@ export class ParticleEngine {
       });
     }
 
+    // Interactive surroundings: Physical concussive impulse on nearby placed crackers
+    this.activeSims.forEach((otherSim) => {
+      if (otherSim !== sim && otherSim.placed.state === 'idle') {
+        const diffX = otherSim.placed.position[0] - origin.x;
+        const diffZ = otherSim.placed.position[2] - origin.z;
+        const dist = Math.hypot(diffX, diffZ);
+        if (dist < 2.6 && dist > 0.05) {
+          const impulse = (2.6 - dist) * 0.28;
+          const pushX = (diffX / dist) * impulse;
+          const pushZ = (diffZ / dist) * impulse;
+          otherSim.placed.position[0] += pushX;
+          otherSim.placed.position[2] += pushZ;
+          otherSim.rootMesh.position.x = otherSim.placed.position[0];
+          otherSim.rootMesh.position.z = otherSim.placed.position[2];
+          otherSim.rootMesh.rotation.y += (Math.random() - 0.5) * 0.6;
+        }
+      }
+    });
+
     // Screen Concussive Jolt
     if (this.onScreenShake) {
       this.onScreenShake(isHydro ? 1.35 : 1.15);
@@ -596,7 +619,7 @@ export class ParticleEngine {
     for (let i = 0; i < shellCount; i++) {
       const phi = Math.acos(1 - 2 * (i / shellCount));
       const theta = Math.PI * (1 + 5 ** 0.5) * i;
-      const speed = willDroop ? (4.2 + Math.random() * 5.5) : (7.0 + Math.random() * 8.5);
+      const speed = willDroop ? (3.2 + Math.random() * 3.4) : (4.4 + Math.random() * 4.4);
 
       const vel = new THREE.Vector3(
         Math.sin(phi) * Math.cos(theta) * speed,
@@ -613,8 +636,8 @@ export class ParticleEngine {
         size: willDroop ? 0.27 : 0.23,
         alpha: 1.0,
         life: 0,
-        maxLife: willDroop ? (2.6 + Math.random() * 1.2) : (1.6 + Math.random() * 0.7),
-        gravity: willDroop ? -2.2 : -4.0, // Graceful droop
+        maxLife: willDroop ? (2.4 + Math.random() * 1.0) : (1.6 + Math.random() * 0.7),
+        gravity: willDroop ? -2.2 : -3.8, // Graceful droop
         drag: 0.965,
         bounceFloor: false,
       });
@@ -625,7 +648,7 @@ export class ParticleEngine {
     for (let w = 0; w < willowCount; w++) {
       const phi = Math.acos(1 - 2 * (w / willowCount));
       const theta = Math.PI * (1 + 5 ** 0.5) * w;
-      const speed = 3.2 + Math.random() * 4.8;
+      const speed = 2.4 + Math.random() * 3.2;
 
       const vel = new THREE.Vector3(
         Math.sin(phi) * Math.cos(theta) * speed,
@@ -772,6 +795,30 @@ export class ParticleEngine {
           if (disc) {
             disc.rotation.y += delta * spinSpeed;
           }
+
+          // Dynamic wandering skitter physics across the floor tiles
+          if (!sim.chakkarPhysics) {
+            sim.chakkarPhysics = {
+              wanderAngle: Math.random() * Math.PI * 2,
+              wanderSpeed: 0.38 + Math.random() * 0.3,
+              origX: sim.placed.position[0],
+              origZ: sim.placed.position[2],
+            };
+          }
+          const cp = sim.chakkarPhysics;
+          cp.wanderAngle += (Math.random() - 0.5) * delta * 6.0;
+          // Keep within reasonable 1.1m wander radius so it dances naturally on the terrace
+          const curDist = Math.hypot(sim.placed.position[0] - cp.origX, sim.placed.position[2] - cp.origZ);
+          if (curDist > 0.95) {
+            const steerAngle = Math.atan2(cp.origZ - sim.placed.position[2], cp.origX - sim.placed.position[0]);
+            cp.wanderAngle = steerAngle + (Math.random() - 0.5) * 0.4;
+          }
+          sim.placed.position[0] += Math.cos(cp.wanderAngle) * cp.wanderSpeed * delta;
+          sim.placed.position[2] += Math.sin(cp.wanderAngle) * cp.wanderSpeed * delta;
+          sim.rootMesh.position.x = sim.placed.position[0];
+          sim.rootMesh.position.z = sim.placed.position[2];
+          pos.x = sim.placed.position[0];
+          pos.z = sim.placed.position[2];
 
           // Dynamic pulsating roaring fire light
           if (sim.burstLight) {
@@ -1062,7 +1109,9 @@ export class ParticleEngine {
                 rkt.burstDone = true;
                 rkt.mesh.visible = false;
                 const isTitanium = sim.def.id === 'rocket_titanium';
-                this.triggerAerialSkyburst(rkt.mesh.position.clone(), sim.def.colorScheme, 320, isTitanium);
+                const burstWorldPos = new THREE.Vector3();
+                rkt.mesh.getWorldPosition(burstWorldPos);
+                this.triggerAerialSkyburst(burstWorldPos, sim.def.colorScheme, 340, isTitanium);
                 if (this.onScreenShake) this.onScreenShake(0.6);
               }
             }
@@ -1124,8 +1173,8 @@ export class ParticleEngine {
                 const trElapsed = performance.now() / 1000 - tracerStart;
                 const frac = Math.min(1, trElapsed / flightTime);
                 const curPos = startPos.clone().lerp(apex, frac);
-                // Graceful high-altitude ballistic parabola
-                curPos.y += Math.sin(frac * Math.PI) * 1.5;
+                // Balanced mortar ballistic arc
+                curPos.y += Math.sin(frac * Math.PI) * 0.45;
 
                 // Blazing incandescent comet core
                 this.activeParticles.push({
@@ -1290,6 +1339,21 @@ export class ParticleEngine {
       startTime: performance.now() / 1000,
       isSpent: false,
     });
+  }
+
+  // Dynamically update cracker position when repositioned/moved by user
+  public updateCrackerPosition(instanceId: string, position: [number, number, number]) {
+    const sim = this.activeSims.get(instanceId);
+    if (sim) {
+      sim.placed.position = position;
+      sim.rootMesh.position.set(position[0], position[1], position[2]);
+      if (sim.fuseLight) {
+        sim.fuseLight.position.set(position[0], position[1] + 0.5, position[2]);
+      }
+      if (sim.burstLight) {
+        sim.burstLight.position.set(position[0], position[1] + 0.35, position[2]);
+      }
+    }
   }
 
   // Remove a cracker instance

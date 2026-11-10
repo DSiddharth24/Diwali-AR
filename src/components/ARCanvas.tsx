@@ -6,10 +6,9 @@
 import React, { useEffect, useRef, useState, useCallback, useImperativeHandle } from 'react';
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import { CrackerDefinition, PlacedCracker } from '../types/crackers';
+import { CrackerDefinition, CRACKER_DEFINITIONS, PlacedCracker } from '../types/crackers';
 import { createCracker3DModel, createRangoliReticle } from '../three/crackerModels';
 import { ParticleEngine } from '../three/particleEngine';
-import { Eye } from 'lucide-react';
 
 export interface ARCanvasHandle {
   getGroundPositionFromScreen: (clientX: number, clientY: number) => [number, number, number];
@@ -22,8 +21,7 @@ interface ARCanvasProps {
   placedCrackers: PlacedCracker[];
   onCrackerPlaced: (cracker: PlacedCracker) => void;
   onIgniteCracker: (instanceId: string) => void;
-  onSparklerTouchCracker?: (instanceId: string) => void;
-  onTakeSnapshotReady?: (canvas: HTMLCanvasElement) => void;
+  onCrackerMoved?: (instanceId: string, position: [number, number, number]) => void;
   particleEngineRef: React.MutableRefObject<ParticleEngine | null>;
   draggedCracker: CrackerDefinition | null;
   dragPointer: { x: number; y: number } | null;
@@ -38,6 +36,7 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
   placedCrackers,
   onCrackerPlaced,
   onIgniteCracker,
+  onCrackerMoved,
   particleEngineRef,
   draggedCracker,
   dragPointer,
@@ -59,22 +58,22 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
   // Ground raycast plane
   const groundPlane = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
   const raycaster = useRef(new THREE.Raycaster());
-  const mouseCoords = useRef(new THREE.Vector2(0, 0));
-  const pointerPos = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, -2.5));
+  const pointerPos = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, -2.2));
 
   // Screen shake animation
   const [shakeOffset, setShakeOffset] = useState({ x: 0, y: 0 });
 
-  // Camera perspective controls for Virtual Mode
+  // Camera perspective controls for Virtual Mode & AR Mode
   const isDragging = useRef(false);
+  const grabbedCrackerId = useRef<string | null>(null);
   const pointerDownCoord = useRef<{ x: number; y: number } | null>(null);
   const prevMousePos = useRef({ x: 0, y: 0 });
   const cameraAngle = useRef({ theta: 0, phi: 0.22 });
   const cameraPitch = useRef(0.18); // Natural eye-level framing showing terrace and night sky
-  const cameraDistance = useRef(3.8);
+  const cameraDistance = useRef(3.6);
 
-  const currentLookAt = useRef(new THREE.Vector3(0, 1.2, -1.0));
-  const desiredLookAt = useRef(new THREE.Vector3(0, 1.2, -1.0));
+  const currentLookAt = useRef(new THREE.Vector3(0, 1.1, -1.0));
+  const desiredLookAt = useRef(new THREE.Vector3(0, 1.1, -1.0));
 
   // Expose ground raycasting handle to parent
   useImperativeHandle(canvasHandleRef, () => ({
@@ -101,18 +100,44 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
     return isBurning && isAerial;
   });
 
-  // Dynamically update desired camera lookAt target for optimal fireworks framing
+  // Dynamically update desired camera lookAt target for optimal fireworks framing in ALL modes
   useEffect(() => {
-    if (isARCameraMode) return;
-
     if (isSkyViewActive || selectedCracker.isAerial || hasActiveAerialCracker) {
       // Elevated sky focus: soaring mortar launch + high-altitude bursting blooms in full panoramic view
-      desiredLookAt.current.set(0, 3.4, -1.5);
+      desiredLookAt.current.set(0, 2.9, -1.2);
     } else {
       // Balanced ground focus with terrace and skyline backdrop
       desiredLookAt.current.set(0, 0.9, -1.0);
     }
-  }, [isSkyViewActive, selectedCracker.isAerial, hasActiveAerialCracker, isARCameraMode]);
+  }, [isSkyViewActive, selectedCracker.isAerial, hasActiveAerialCracker]);
+
+  // Mobile Gyroscope / Device Orientation Support
+  useEffect(() => {
+    const handleOrientation = (e: DeviceOrientationEvent) => {
+      if (e.beta === null) return;
+      // In portrait: beta is ~75 deg when holding phone upright.
+      // Tilting up to the sky reduces beta; tilting down increases it.
+      const tiltOffset = (75 - e.beta) * 0.015;
+      const clampedTilt = Math.max(-0.35, Math.min(1.2, tiltOffset));
+      cameraPitch.current = THREE.MathUtils.lerp(cameraPitch.current, 0.18 + clampedTilt, 0.12);
+
+      if (cameraRef.current) {
+        const dist = cameraDistance.current;
+        const x = Math.sin(cameraAngle.current.theta) * dist;
+        const y = 1.6 + Math.sin(cameraPitch.current) * 1.6;
+        const z = Math.cos(cameraAngle.current.theta) * dist;
+        cameraRef.current.position.set(x, y, z);
+      }
+
+      const skyFactor = (selectedCracker.isAerial || isSkyViewActive || hasActiveAerialCracker) ? 2.9 : 0.9;
+      desiredLookAt.current.y = skyFactor + Math.sin(cameraPitch.current) * 2.8;
+    };
+
+    window.addEventListener('deviceorientation', handleOrientation, true);
+    return () => {
+      window.removeEventListener('deviceorientation', handleOrientation, true);
+    };
+  }, [isSkyViewActive, selectedCracker.isAerial, hasActiveAerialCracker]);
 
   // Initialize Scene
   useEffect(() => {
@@ -158,64 +183,55 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
     canvasRef.current = renderer.domElement;
     mountRef.current.appendChild(renderer.domElement);
 
-    // Mandatory Studio Environment Reflection
+    // Dynamic Environment IBL Lighting
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
-    scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
-    pmremGenerator.dispose();
+    pmremGenerator.compileEquirectangularShader();
+    const envScene = new RoomEnvironment();
+    scene.environment = pmremGenerator.fromScene(envScene, 0.04).texture;
 
-    // Lighting rig: Warm directional key light + cool hemisphere ambient
-    const keyLight = new THREE.DirectionalLight('#FFEDD5', 1.8);
-    keyLight.position.set(3, 8, 4);
-    keyLight.castShadow = !isSoftwareGl;
-    if (keyLight.shadow) {
-      keyLight.shadow.mapSize.width = 1024;
-      keyLight.shadow.mapSize.height = 1024;
-      keyLight.shadow.bias = -0.0005;
-    }
-    scene.add(keyLight);
-
-    const hemiLight = new THREE.HemisphereLight('#38BDF8', '#78350F', 0.85);
+    // Ambient night lighting
+    const hemiLight = new THREE.HemisphereLight('#38BDF8', '#1E1B4B', 0.65);
     scene.add(hemiLight);
 
-    const amberAmbi = new THREE.AmbientLight('#F59E0B', 0.45);
-    scene.add(amberAmbi);
+    // Warm diya glow from terrace edges
+    const warmKeyLight = new THREE.DirectionalLight('#F59E0B', 0.9);
+    warmKeyLight.position.set(3, 4, 2);
+    warmKeyLight.castShadow = !isSoftwareGl;
+    warmKeyLight.shadow.mapSize.width = 1024;
+    warmKeyLight.shadow.mapSize.height = 1024;
+    scene.add(warmKeyLight);
 
-    // Ground Plane for Shadow & Raycasting
-    const groundGeo = new THREE.PlaneGeometry(50, 50);
+    // Ground Plane for Shadows and Placement
+    const groundGeo = new THREE.PlaneGeometry(35, 35);
     const groundMat = new THREE.ShadowMaterial({ opacity: 0.45 });
-    const ground = new THREE.Mesh(groundGeo, groundMat);
-    ground.rotation.x = -Math.PI / 2;
-    ground.receiveShadow = !isSoftwareGl;
-    scene.add(ground);
-    groundMeshRef.current = ground;
+    const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+    groundMesh.rotation.x = -Math.PI / 2;
+    groundMesh.receiveShadow = !isSoftwareGl;
+    groundMesh.position.y = 0;
+    scene.add(groundMesh);
+    groundMeshRef.current = groundMesh;
 
-    // Glowing Placement Reticle
+    // Interactive Festive Reticle Indicator
     const reticle = createRangoliReticle();
-    reticle.position.set(0, 0.005, -2.5);
+    reticle.visible = false;
     scene.add(reticle);
     reticleRef.current = reticle;
 
-    // Particle Engine initialization
+    // Initialize Particle & Fireworks Physics Engine
     const pEngine = new ParticleEngine(scene);
-    particleEngineRef.current = pEngine;
     pEngine.onScreenShake = (intensity: number) => {
-      let step = 0;
-      const shakeInterval = setInterval(() => {
-        step++;
-        if (step > 8) {
-          clearInterval(shakeInterval);
-          setShakeOffset({ x: 0, y: 0 });
-        } else {
-          const decay = (8 - step) / 8;
-          setShakeOffset({
-            x: (Math.random() - 0.5) * 20 * intensity * decay,
-            y: (Math.random() - 0.5) * 20 * intensity * decay,
-          });
-        }
-      }, 25);
+      const shakeAmt = intensity * 10;
+      setShakeOffset({
+        x: (Math.random() - 0.5) * shakeAmt,
+        y: (Math.random() - 0.5) * shakeAmt,
+      });
+      setTimeout(() => {
+        setShakeOffset({ x: 0, y: 0 });
+      }, 70);
     };
+    particleEngineRef.current = pEngine;
 
-    // Responsive Resize Handler
+    // Resize Handler
     const handleResize = () => {
       if (!mountRef.current || !renderer || !camera) return;
       const w = mountRef.current.clientWidth;
@@ -227,7 +243,7 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
     window.addEventListener('resize', handleResize);
 
     // Animation Render Loop
-    let frameId = 0;
+    let frameId: number;
     const clock = new THREE.Clock();
 
     function afterDraw(cb: () => void) {
@@ -331,20 +347,25 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
     }
   }, [isARCameraMode]);
 
-  // Synchronize 3D meshes for placed crackers
+  // Synchronize 3D meshes for placed crackers with authentic distinct models
   useEffect(() => {
     const scene = sceneRef.current;
     const pEngine = particleEngineRef.current;
     if (!scene || !pEngine) return;
 
     placedCrackers.forEach((placed) => {
-      if (!crackerMeshesMap.current.has(placed.instanceId)) {
-        const mesh = createCracker3DModel(selectedCracker);
+      const existingMesh = crackerMeshesMap.current.get(placed.instanceId);
+      if (!existingMesh) {
+        const def = CRACKER_DEFINITIONS.find((c) => c.id === placed.crackerId) || selectedCracker;
+        const mesh = createCracker3DModel(def);
         mesh.position.set(...placed.position);
         mesh.rotation.y = placed.rotationY;
         scene.add(mesh);
         crackerMeshesMap.current.set(placed.instanceId, mesh);
-        pEngine.registerCracker(placed, selectedCracker, mesh);
+        pEngine.registerCracker(placed, def, mesh);
+      } else {
+        // Keep mesh position in sync with placed position
+        existingMesh.position.set(...placed.position);
       }
     });
 
@@ -368,40 +389,72 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
         const ghost = createCracker3DModel(draggedCracker);
         ghost.position.set(pointerPos.current.x, 0.28, pointerPos.current.z);
         scene.add(ghost);
+
+        ghost.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            const m = child as THREE.Mesh;
+            m.castShadow = false;
+            m.receiveShadow = false;
+            if (m.material) {
+              const origMat = m.material as THREE.MeshStandardMaterial;
+              m.material = new THREE.MeshStandardMaterial({
+                color: origMat.color,
+                transparent: true,
+                opacity: 0.8,
+                emissive: new THREE.Color('#F59E0B'),
+                emissiveIntensity: 0.6,
+                wireframe: false,
+              });
+            }
+          }
+        });
         ghostMeshRef.current = ghost;
+      } else {
+        ghostMeshRef.current.position.set(pointerPos.current.x, 0.28, pointerPos.current.z);
+      }
+
+      if (reticleRef.current) {
+        reticleRef.current.position.set(pointerPos.current.x, 0.005, pointerPos.current.z);
+        reticleRef.current.visible = true;
       }
     } else {
       if (ghostMeshRef.current) {
         scene.remove(ghostMeshRef.current);
         ghostMeshRef.current = null;
       }
+      if (reticleRef.current && !grabbedCrackerId.current) {
+        reticleRef.current.visible = false;
+      }
     }
   }, [draggedCracker]);
 
-  // Update pointer ray
+  // Raycast to Ground Plane
   const updatePointerRay = useCallback((clientX: number, clientY: number) => {
     if (!mountRef.current || !cameraRef.current) return;
     const rect = mountRef.current.getBoundingClientRect();
-    mouseCoords.current.x = ((clientX - rect.left) / rect.width) * 2 - 1;
-    mouseCoords.current.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    const normX = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const normY = -((clientY - rect.top) / rect.height) * 2 + 1;
 
-    raycaster.current.setFromCamera(mouseCoords.current, cameraRef.current);
+    raycaster.current.setFromCamera(new THREE.Vector2(normX, normY), cameraRef.current);
+
     const hitPoint = new THREE.Vector3();
-    const hit = raycaster.current.ray.intersectPlane(groundPlane.current, hitPoint);
-
-    if (hit) {
+    if (raycaster.current.ray.intersectPlane(groundPlane.current, hitPoint)) {
       pointerPos.current.copy(hitPoint);
-      if (reticleRef.current) {
+
+      if (reticleRef.current && (draggedCracker || grabbedCrackerId.current)) {
         reticleRef.current.position.set(hitPoint.x, 0.005, hitPoint.z);
+        reticleRef.current.visible = true;
       }
+
       if (ghostMeshRef.current) {
         ghostMeshRef.current.position.set(hitPoint.x, 0.28, hitPoint.z);
       }
+
       if (particleEngineRef.current && isSparklerMode) {
         particleEngineRef.current.sparklerPosition.copy(hitPoint).add(new THREE.Vector3(0, 0.25, 0));
       }
     }
-  }, [isSparklerMode, particleEngineRef]);
+  }, [isSparklerMode, draggedCracker, particleEngineRef]);
 
   useEffect(() => {
     if (dragPointer) {
@@ -420,7 +473,7 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
       particleEngineRef.current.isSparklerActive = isSparklerMode;
     }
 
-    // Check if clicked directly on an existing cracker to ignite
+    // Check if clicked directly on an existing cracker to reposition or ignite
     if (sceneRef.current && cameraRef.current) {
       const intersects = raycaster.current.intersectObjects(sceneRef.current.children, true);
       for (const hit of intersects) {
@@ -431,8 +484,18 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
         if (rootGroup) {
           for (const [id, mesh] of crackerMeshesMap.current.entries()) {
             if (mesh === rootGroup) {
-              onIgniteCracker(id);
-              return;
+              const placed = placedCrackers.find((p) => p.instanceId === id);
+              if (placed && placed.state === 'idle') {
+                grabbedCrackerId.current = id;
+                if (reticleRef.current) {
+                  reticleRef.current.position.set(placed.position[0], 0.005, placed.position[2]);
+                  reticleRef.current.visible = true;
+                }
+                return;
+              } else {
+                onIgniteCracker(id);
+                return;
+              }
             }
           }
         }
@@ -443,14 +506,27 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     updatePointerRay(e.clientX, e.clientY);
 
-    // In Virtual Terrace mode: drag to look around naturally (smooth orbit & pitch)
-    if (isDragging.current && !isARCameraMode && !isSparklerMode && !draggedCracker && cameraRef.current) {
+    // If repositioning an existing cracker: slide it across the terrace floor
+    if (isDragging.current && grabbedCrackerId.current) {
+      const mesh = crackerMeshesMap.current.get(grabbedCrackerId.current);
+      if (mesh) {
+        mesh.position.set(pointerPos.current.x, 0, pointerPos.current.z);
+      }
+      if (reticleRef.current) {
+        reticleRef.current.position.set(pointerPos.current.x, 0.005, pointerPos.current.z);
+        reticleRef.current.visible = true;
+      }
+      return;
+    }
+
+    // Drag to look around naturally (smooth orbit & pitch) in BOTH Virtual Terrace and AR mode
+    if (isDragging.current && !isSparklerMode && !draggedCracker && !grabbedCrackerId.current && cameraRef.current) {
       const deltaX = e.clientX - prevMousePos.current.x;
       const deltaY = e.clientY - prevMousePos.current.y;
       prevMousePos.current = { x: e.clientX, y: e.clientY };
 
       cameraAngle.current.theta -= deltaX * 0.005;
-      cameraPitch.current = Math.max(-0.25, Math.min(1.15, cameraPitch.current - deltaY * 0.005));
+      cameraPitch.current = Math.max(-0.35, Math.min(1.25, cameraPitch.current - deltaY * 0.005));
 
       const dist = cameraDistance.current;
       const x = Math.sin(cameraAngle.current.theta) * dist;
@@ -459,7 +535,7 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
 
       cameraRef.current.position.set(x, y, z);
       desiredLookAt.current.y = (selectedCracker.isAerial || isSkyViewActive || hasActiveAerialCracker)
-        ? 3.4 + Math.sin(cameraPitch.current) * 3.2
+        ? 2.9 + Math.sin(cameraPitch.current) * 2.8
         : 0.9 + Math.sin(cameraPitch.current) * 2.5;
     }
 
@@ -479,7 +555,36 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    // Only place cracker if it was a clean stationary tap (not a camera drag)
+    // If we were holding an existing cracker: check if it was dragged or tapped
+    if (grabbedCrackerId.current && pointerDownCoord.current) {
+      const distMoved = Math.hypot(e.clientX - pointerDownCoord.current.x, e.clientY - pointerDownCoord.current.y);
+      const targetId = grabbedCrackerId.current;
+      grabbedCrackerId.current = null;
+
+      if (reticleRef.current && !draggedCracker) {
+        reticleRef.current.visible = false;
+      }
+
+      if (distMoved > 10) {
+        // Cracker was repositioned!
+        const newPos: [number, number, number] = [pointerPos.current.x, 0, pointerPos.current.z];
+        if (onCrackerMoved) {
+          onCrackerMoved(targetId, newPos);
+        }
+        if (particleEngineRef.current) {
+          particleEngineRef.current.updateCrackerPosition(targetId, newPos);
+        }
+      } else {
+        // Clean tap: ignite!
+        onIgniteCracker(targetId);
+      }
+
+      isDragging.current = false;
+      pointerDownCoord.current = null;
+      return;
+    }
+
+    // Only place a new cracker if it was a clean stationary tap on empty space
     if (pointerDownCoord.current && !isSparklerMode && !draggedCracker) {
       const distMoved = Math.hypot(e.clientX - pointerDownCoord.current.x, e.clientY - pointerDownCoord.current.y);
       if (distMoved < 10) {
