@@ -1,0 +1,6 @@
+{
+  "name": "AR Diwali Fireworks Simulator",
+  "description": "Superimpose realistic 3D Diwali crackers and fireworks into your room or outdoor space with the camera, featuring Flower Pots, Chakkars, Garlands, Bombs, Rockets, Aerial Cakes, and authentic spatial audio.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
